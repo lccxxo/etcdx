@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+// etcdx 的 KV API 定义。
+// 这是客户端（etcdxctl 等）与服务端 (etcdx-server) 之间唯一的契约。
+// 任何字段调整都要保持 proto3 兼容性：不要改 tag 号、不要改字段类型。
+
+package etcdx.api.v1;
+
+// 生成出来的 Go 代码会放在 api/v1 目录、包名为 v1。
+option go_package = "github.com/lccxxo/etcdx/api/v1;v1";
+
+// ============================================================================
+// Service
+// ============================================================================
+
+// KV 提供基础的键值读写。
+// 设计原则：所有写操作（Put/Delete）只在 Raft Leader 上提案；读操作（Range）
+// 当前直接读 Leader 本地存储（不做线性一致），后续阶段可升级为 ReadIndex。
+service KV {
+    // 写入或更新一个 key。若 key 已存在则覆盖，旧值可通过 prev_kv=true 拿到。
+    rpc Put(PutRequest) returns (PutResponse);
+
+    // 读取单个 key 或一个 key 范围。
+    // 单 key:   只设 key，range_end 留空
+    // 前缀扫描:  range_end = key 末字节 +1（约定俗成的写法，例如 key="a", end="b"）
+    // 全量范围:  range_end 设为单字节 0x00 表示 "大于等于 key 的所有 key"
+    rpc Range(RangeRequest) returns (RangeResponse);
+
+    // 删除单个 key 或一个 key 范围，语义与 Range 对称。
+    rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+// ============================================================================
+// Common types
+// ============================================================================
+
+// KeyValue 是 etcdx 里"一份键值数据"的标准表示。
+// 不只是 (key, value) 两个字段——还携带 MVCC 元数据用于支持 Watch、版本对比等。
+message KeyValue {
+    // 用户的 key。bytes 而非 string：允许任意二进制内容，不强制 UTF-8。
+    bytes key = 1;
+
+    // 用户的 value。同上，可以是任意字节。
+    bytes value = 2;
+
+    // 这个 key 第一次被创建时分配的 revision。
+    // 用途：检测 "这个 key 是不是新插入的" —— 如果 create_revision == mod_revision，
+    //       说明本次写入就是首次创建；否则是覆盖更新。
+    int64 create_revision = 3;
+
+    // 这个 key 最近一次被修改时的 revision。每次 Put/Delete 都会刷新 mod_revision。
+    // 用途：
+    //   1) Watch 客户端用它判断"我有没有漏接事件"（事件流必须连续递增）
+    //   2) 客户端做乐观并发：先 Range 拿到 mod_revision，再 Put 时携带它做 CAS
+    int64 mod_revision = 4;
+}
+
+// ============================================================================
+// Put
+// ============================================================================
+
+message PutRequest {
+    // 要写入的 key（必填，不能为空）。
+    bytes key = 1;
+
+    // 要写入的 value。可以为空字节串（代表"占位 key"，但仍会分配 revision）。
+    bytes value = 2;
+
+    // 是否要在响应里带回旧值。
+    // 默认 false —— 不需要旧值时可以省去一次 bbolt 读取，减少延迟。
+    // true 时服务端会在写入前先读取当前值放到 PutResponse.prev_kv。
+    bool prev_kv = 3;
+}
+
+message PutResponse {
+    // 本次 Put 操作分配到的全局 revision（单调递增，全集群一致）。
+    // 客户端可以用它和后续 Watch 事件做去重 / 顺序校验。
+    int64 revision = 1;
+
+    // 旧值。仅当 PutRequest.prev_kv == true 且 key 之前存在时才有值；
+    // 否则该字段为 nil。
+    // 注意 proto3 的 message 字段天然可空（nil 表示 "未设置"）。
+    KeyValue prev_kv = 2;
+}
+
+// ============================================================================
+// Range（读取）
+// ============================================================================
+
+message RangeRequest {
+    // 范围起点（含）。
+    // 单 key 查询时这就是要查的那个 key。
+    bytes key = 1;
+
+    // 范围终点（不含）。三种约定：
+    //   1) range_end 为空 (len=0)            -> 单 key 查询，只返回 key 这一个
+    //   2) range_end = single byte 0x00      -> 查询所有 ≥ key 的 key（全量）
+    //   3) range_end 为其他值                 -> 半开区间 [key, range_end)，
+    //                                           常用于前缀扫描（end = prefix 自增一位）
+    // 这个约定和 etcd 官方 v3 API 保持一致，便于将来切换 SDK。
+    bytes range_end = 2;
+}
+
+message RangeResponse {
+    // 命中的 KV 列表。按 key 字典序升序排列。
+    // 空范围（无命中）时返回空切片，不是 error。
+    repeated KeyValue kvs = 1;
+
+    // 当前 store 的最新 revision（不是查询结果的 revision）。
+    // 客户端可以拿它作为后续 Watch 的起始点：
+    //   "从 revision+1 开始监听，保证不漏不重"
+    int64 revision = 2;
+}
+
+// ============================================================================
+// Delete
+// ============================================================================
+
+message DeleteRequest {
+    // 删除范围起点（含）。同 RangeRequest.key。
+    bytes key = 1;
+
+    // 删除范围终点（不含）。同 RangeRequest.range_end，三种约定一致。
+    // 这样 Delete 既能删单 key、也能删前缀、也能删全部，接口统一。
+    bytes range_end = 2;
+
+    // 是否在响应里返回被删除的 KV 内容。
+    // 用途：审计、回滚、把被删除的数据写到外部归档等。
+    bool prev_kv = 3;
+}
+
+message DeleteResponse {
+    // 实际删除的 key 数量。可能为 0（范围内没有 key）。
+    int64 deleted = 1;
+
+    // 被删除的所有 KV 内容。仅当 DeleteRequest.prev_kv == true 时非空。
+    repeated KeyValue prev_kvs = 2;
+
+    // 本次 Delete 操作的 revision（即使删除了多个 key，整个 Delete 也只占用一个 revision）。
+    // 这个语义与 etcd 一致：一次 RPC 调用对应一个原子提交，分配一个 revision。
+    int64 revision = 3;
+}
