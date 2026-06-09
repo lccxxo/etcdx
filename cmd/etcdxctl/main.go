@@ -53,12 +53,21 @@ func main() {
 		for _, kv := range resp.Kvs {
 			fmt.Printf("%s = %s\n", kv.Key, kv.Value)
 		}
+	case "del":
+		if len(args) != 2 {
+			usage()
+		}
+		resp, err := cli.Delete(ctx, &pb.DeleteRequest{Key: []byte(args[1])})
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("OK deleted=", resp.Deleted)
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: etcdxctl [--endpoint addr] <put|get> ...")
+	fmt.Fprintln(os.Stderr, "usage: etcdxctl [--endpoint addr] <put|get|del> ...")
 	os.Exit(2)
 }
