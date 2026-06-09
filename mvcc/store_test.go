@@ -31,10 +31,14 @@ func TestPutGet(t *testing.T) {
 		t.Fatalf("first put should have no prev, got %+v", prev)
 	}
 
-	kv, err := s.Get([]byte("foo"))
+	kvs, _, err := s.Range([]byte("foo"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(kvs) != 1 {
+		t.Fatalf("want 1 kv, got %d", len(kvs))
+	}
+	kv := kvs[0]
 	if !bytes.Equal(kv.Value, []byte("bar")) {
 		t.Fatalf("value mismatch: %s", kv.Value)
 	}
@@ -56,20 +60,16 @@ func TestOverwriteReturnsPrev(t *testing.T) {
 	if prev == nil || !bytes.Equal(prev.Value, []byte("v1")) {
 		t.Fatalf("prev should be v1, got %+v", prev)
 	}
-	kv, _ := s.Get([]byte("k"))
+	kvs, _, _ := s.Range([]byte("k"), nil)
+	if len(kvs) != 1 {
+		t.Fatalf("want 1 kv, got %d", len(kvs))
+	}
+	kv := kvs[0]
 	if !bytes.Equal(kv.Value, []byte("v2")) {
 		t.Fatal("latest value should be v2")
 	}
 	if kv.CreateRevision != 1 || kv.ModRevision != 2 {
 		t.Fatal("create/mod rev wrong")
-	}
-}
-
-func TestGetMissing(t *testing.T) {
-	s := newTestStore(t)
-	_, err := s.Get([]byte("nope"))
-	if err != ErrKeyNotFound {
-		t.Fatalf("want ErrKeyNotFound, got %v", err)
 	}
 }
 
@@ -160,8 +160,8 @@ func TestDeleteSingleKey(t *testing.T) {
 	if rev != 2 {
 		t.Fatalf("want rev=2 (1 put + 1 delete), got %d", rev)
 	}
-	if _, err := s.Get([]byte("foo")); err != ErrKeyNotFound {
-		t.Fatalf("foo should be gone, got err=%v", err)
+	if kvs, _, _ := s.Range([]byte("foo"), nil); len(kvs) != 0 {
+		t.Fatalf("foo should be gone, got %+v", kvs)
 	}
 }
 
@@ -178,15 +178,15 @@ func TestDeleteRange(t *testing.T) {
 	if deleted != 2 {
 		t.Fatalf("want deleted=2, got %d", deleted)
 	}
-	if _, err := s.Get([]byte("a1")); err != ErrKeyNotFound {
+	if kvs, _, _ := s.Range([]byte("a1"), nil); len(kvs) != 0 {
 		t.Fatal("a1 should be gone")
 	}
-	if _, err := s.Get([]byte("a2")); err != ErrKeyNotFound {
+	if kvs, _, _ := s.Range([]byte("a2"), nil); len(kvs) != 0 {
 		t.Fatal("a2 should be gone")
 	}
-	kv, err := s.Get([]byte("b1"))
-	if err != nil || !bytes.Equal(kv.Value, []byte("3")) {
-		t.Fatalf("b1 should survive, got kv=%+v err=%v", kv, err)
+	kvs, _, err := s.Range([]byte("b1"), nil)
+	if err != nil || len(kvs) != 1 || !bytes.Equal(kvs[0].Value, []byte("3")) {
+		t.Fatalf("b1 should survive, got kvs=%+v err=%v", kvs, err)
 	}
 }
 

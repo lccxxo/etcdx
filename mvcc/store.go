@@ -2,7 +2,6 @@ package mvcc
 
 import (
 	"bytes"
-	"errors"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -14,8 +13,6 @@ var (
 
 	keyCurrentRev = []byte("current_rev")
 )
-
-var ErrKeyNotFound = errors.New("key not found")
 
 type KeyValue struct {
 	Key            []byte
@@ -81,24 +78,6 @@ func (s *Store) Put(key, value []byte) (rev int64, prev *KeyValue, err error) {
 	})
 
 	return
-}
-
-func (s *Store) Get(key []byte) (*KeyValue, error) {
-	var out *KeyValue
-	err := s.db.View(func(tx *bolt.Tx) error {
-		revs := decodeRevs(tx.Bucket(bucketKey).Get(key))
-		if len(revs) == 0 {
-			return ErrKeyNotFound
-		}
-		latest := revs[len(revs)-1]
-		kv := decodeKV(tx.Bucket(bucketValue).Get(u64(latest)))
-		out = &kv
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // rangeKeys 在 key bucket 上按 [key, rangeEnd) 语义扫一遍，返回命中的所有 user key。
